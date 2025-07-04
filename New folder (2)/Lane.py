@@ -37,7 +37,7 @@ class EnhancedQLearningAgent:
         self.training_data = []
         self.q_table_file = q_table_file
         self._loaded_training_count = 0
-        self.load_model()
+        self._loaded_adaptive_params = self.load_model()
         
         # Adaptive learning parameters
         self.reward_history = []
@@ -45,6 +45,15 @@ class EnhancedQLearningAgent:
         self.min_learning_rate = 0.01
         self.consecutive_no_improvement = 0
         self.max_no_improvement = 100
+
+    def get_loaded_adaptive_params(self):
+        """Return the adaptive parameters that were loaded from the model file"""
+        return self._loaded_adaptive_params
+
+    def reload_model_and_params(self):
+        """Reload the model and return adaptive parameters (useful when file path changes)"""
+        self._loaded_adaptive_params = self.load_model()
+        return self._loaded_adaptive_params
 
     def is_valid_state(self, state):
         """Check if state contains valid values (no NaN or extreme values)"""
@@ -149,7 +158,7 @@ class EnhancedQLearningAgent:
                 self.consecutive_no_improvement = 0
 
     def load_model(self, filepath=None):
-        """Load Q-table and training data if exists"""
+        """Load Q-table and training data if exists, return adaptive parameters if available"""
         if filepath is None:
             filepath = self.q_table_file
         try:
@@ -165,14 +174,20 @@ class EnhancedQLearningAgent:
                 self.learning_rate = params.get('learning_rate', self.learning_rate)
                 self.discount_factor = params.get('discount_factor', self.discount_factor)
                 self.epsilon = params.get('epsilon', self.epsilon)
+                
+                # Load adaptive parameters if available
+                adaptive_params = model_data.get('adaptive_params', None)
+                if adaptive_params is not None:
+                    print(f"📥 Loaded adaptive parameters: {adaptive_params}")
+                
                 print(f"Loaded Q-table with {len(self.q_table)} states from {filepath} (prev training count: {self._loaded_training_count})")
-                return True
+                return adaptive_params
         except Exception as e:
             print(f"Error loading model: {e}")
         print("No existing Q-table, starting fresh")
-        return False
+        return None
 
-    def save_model(self, filepath=None):
+    def save_model(self, filepath=None, adaptive_params=None):
         """Save model with versioning and backup"""
         if filepath is None:
             filepath = self.q_table_file
@@ -202,6 +217,11 @@ class EnhancedQLearningAgent:
                     'average_reward': np.mean([x['reward'] for x in self.training_data[-100:]]) if self.training_data else 0
                 }
             }
+            
+            # Include adaptive parameters if provided
+            if adaptive_params is not None:
+                model_data['adaptive_params'] = adaptive_params.copy()
+                print(f"💾 Saving adaptive parameters: {adaptive_params}")
             
             with open(filepath, 'wb') as f:
                 pickle.dump(model_data, f)
@@ -325,9 +345,10 @@ class EnhancedDataLogger:
 
 class SmartTrafficController:
     """Enhanced traffic controller with dynamic parameter adjustment"""
-    def __init__(self, state_size=12, action_size=5):
+    def __init__(self, state_size=12, action_size=5, q_table_file=None):
         # Core components
-        self.rl_agent = EnhancedQLearningAgent(state_size, action_size)
+        self.rl_agent = EnhancedQLearningAgent(state_size, action_size, 
+                                               q_table_file=q_table_file or "enhanced_q_table.pkl")
         self.data_logger = EnhancedDataLogger()
         
         # Traffic state tracking
@@ -356,7 +377,7 @@ class SmartTrafficController:
         # Traffic light cache to avoid repeated API calls
         self.tl_logic_cache = {}
         
-        # Dynamic parameters
+        # Default dynamic parameters
         self.adaptive_params = {
             'min_green': 20,
             'max_green': 50,
@@ -368,6 +389,18 @@ class SmartTrafficController:
             'speed_weight': 0.1,
             'left_turn_priority': 1.5
         }
+        
+        # Load and apply saved adaptive parameters if available
+        try:
+            loaded_adaptive_params = self.rl_agent.get_loaded_adaptive_params()
+            if loaded_adaptive_params is not None:
+                # Update adaptive parameters with loaded values, keeping defaults for missing keys
+                self.adaptive_params.update(loaded_adaptive_params)
+                print(f"🔄 Applied loaded adaptive parameters: {self.adaptive_params}")
+            else:
+                print("📝 Using default adaptive parameters (no saved parameters found)")
+        except Exception as e:
+            print(f"⚠️ Error loading adaptive parameters, using defaults: {e}")
         
         # State normalization bounds
         self.norm_bounds = {
@@ -1092,8 +1125,8 @@ class SmartTrafficController:
             # Save collected data
             self.data_logger.save_episode()
             
-            # Save RL model
-            self.rl_agent.save_model()
+            # Save RL model with current adaptive parameters
+            self.rl_agent.save_model(adaptive_params=self.adaptive_params)
             
             # Print performance summary
             perf = self.data_logger.get_performance_summary()
