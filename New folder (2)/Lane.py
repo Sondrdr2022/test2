@@ -119,8 +119,9 @@ class EnhancedQLearningAgent:
         }
         if lane_info:
             entry.update(lane_info)
+            entry['simulation_time'] = lane_info.get('simulation_time', None)
         self.training_data.append(entry)
-        
+                
         # Update adaptive parameters
         self._update_adaptive_parameters(reward)
 
@@ -973,6 +974,7 @@ class SmartTrafficController:
                     'learning_rate': self.rl_agent.learning_rate,
                     'adaptive_params': self.adaptive_params.copy()
                 }
+                lane_info['simulation_time'] = current_time
                 
                 # Update Q-table
                 self.rl_agent.update_q_table(
