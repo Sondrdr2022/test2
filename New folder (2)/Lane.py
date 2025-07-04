@@ -37,7 +37,6 @@ class EnhancedQLearningAgent:
         self.training_data = []
         self.q_table_file = q_table_file
         self._loaded_training_count = 0
-        self.load_model()
         
         # Adaptive learning parameters
         self.reward_history = []
@@ -74,7 +73,8 @@ class EnhancedQLearningAgent:
             if isinstance(state, np.ndarray):
                 key = tuple(np.round(state, 2))
             elif isinstance(state, list):
-                key = tuple(np.round(np.array(state), 2))
+                state_array = np.round(np.array(state), 2)
+                key = tuple(state_array.tolist())
             else:
                 key = tuple(state) if hasattr(state, '__iter__') else (state,)
             
@@ -149,7 +149,7 @@ class EnhancedQLearningAgent:
                 self.consecutive_no_improvement = 0
 
     def load_model(self, filepath=None):
-        """Load Q-table and training data if exists"""
+        """Load Q-table, training data, and adaptive parameters if exists"""
         if filepath is None:
             filepath = self.q_table_file
         try:
@@ -165,15 +165,21 @@ class EnhancedQLearningAgent:
                 self.learning_rate = params.get('learning_rate', self.learning_rate)
                 self.discount_factor = params.get('discount_factor', self.discount_factor)
                 self.epsilon = params.get('epsilon', self.epsilon)
-                print(f"Loaded Q-table with {len(self.q_table)} states from {filepath} (prev training count: {self._loaded_training_count})")
-                return True
+                
+                # Return both success status and adaptive params
+                adaptive_params = model_data.get('adaptive_params', {})
+                print(f"Loaded Q-table with {len(self.q_table)} states from {filepath}")
+                if adaptive_params:
+                    print(f"📋 Loaded adaptive parameters from previous run")
+                
+                return True, adaptive_params
         except Exception as e:
             print(f"Error loading model: {e}")
         print("No existing Q-table, starting fresh")
-        return False
+        return False, {}
 
-    def save_model(self, filepath=None):
-        """Save model with versioning and backup"""
+    def save_model(self, filepath=None, adaptive_params=None):
+        """Save model with versioning, backup, and adaptive parameters"""
         if filepath is None:
             filepath = self.q_table_file
             
@@ -182,7 +188,15 @@ class EnhancedQLearningAgent:
             if os.path.exists(filepath):
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                 backup_path = f"{filepath}.bak_{timestamp}"
-                os.rename(filepath, backup_path)
+                
+                # Retry backup operation
+                for _ in range(3):
+                    try:
+                        os.rename(filepath, backup_path)
+                        break
+                    except Exception as e:
+                        print(f"Retrying backup: {e}")
+                        time.sleep(0.5)
             
             model_data = {
                 'q_table': dict(self.q_table),
@@ -203,8 +217,13 @@ class EnhancedQLearningAgent:
                 }
             }
             
+            # Add adaptive parameters to the saved data
+            if adaptive_params:
+                model_data['adaptive_params'] = adaptive_params.copy()
+                print(f"💾 Saving adaptive parameters: {adaptive_params}")
+            
             with open(filepath, 'wb') as f:
-                pickle.dump(model_data, f)
+                pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
             
             print(f"✅ Model saved with {len(self.training_data)} training entries")
             self.training_data = []  # Clear only after successful save
@@ -265,7 +284,8 @@ class EnhancedDataLogger:
             'flow_route': lane_info.get('flow_route', 0),
             'learning_params': json.dumps({
                 'epsilon': lane_info.get('epsilon', 0),
-                'learning_rate': lane_info.get('learning_rate', 0)
+                'learning_rate': lane_info.get('learning_rate', 0),
+                'adaptive_params': lane_info.get('adaptive_params', {})
             })
         }
         
@@ -356,8 +376,8 @@ class SmartTrafficController:
         # Traffic light cache to avoid repeated API calls
         self.tl_logic_cache = {}
         
-        # Dynamic parameters
-        self.adaptive_params = {
+        # DEFAULT dynamic parameters (used as fallback)
+        default_adaptive_params = {
             'min_green': 20,
             'max_green': 50,
             'starvation_threshold': 120,
@@ -368,6 +388,15 @@ class SmartTrafficController:
             'speed_weight': 0.1,
             'left_turn_priority': 1.5
         }
+        
+        # Load saved adaptive parameters if they exist
+        success, loaded_adaptive_params = self.rl_agent.load_model()
+        if success and loaded_adaptive_params:
+            self.adaptive_params = loaded_adaptive_params.copy()
+            print(f"🔄 Loaded adaptive parameters: {self.adaptive_params}")
+        else:
+            self.adaptive_params = default_adaptive_params.copy()
+            print("🆕 Using default adaptive parameters")
         
         # State normalization bounds
         self.norm_bounds = {
@@ -393,7 +422,7 @@ class SmartTrafficController:
         return self.tl_logic_cache[tl_id]
 
     def _get_phase_count(self, tl_id):
-        """Get number of phases for traffic light - FIXED METHOD"""
+        """Get number of phases for traffic light"""
         try:
             logic = self._get_traffic_light_logic(tl_id)
             if logic:
@@ -407,7 +436,7 @@ class SmartTrafficController:
             return 4  # Default fallback
 
     def _get_phase_name(self, tl_id, phase_idx):
-        """Get phase name - FIXED METHOD"""
+        """Get phase name"""
         try:
             logic = self._get_traffic_light_logic(tl_id)
             if logic and phase_idx < len(logic.phases):
@@ -775,7 +804,7 @@ class SmartTrafficController:
         return candidate_lanes[0][0]
 
     def _execute_control_action(self, tl_id, target_lane, action, lane_data, current_time):
-        """Execute the selected control action - FIXED TraCI API calls"""
+        """Execute the selected control action"""
         try:
             # Ensure traffic light exists
             if tl_id not in traci.trafficlight.getIDList():
@@ -798,7 +827,7 @@ class SmartTrafficController:
                     self.last_green_time[target_lane] = current_time
                     print(f"🟢 RL ACTION: Green for {target_lane} (duration={green_time}s)")
                     
-            elif action == 1:  # Next phase - FIXED: Use custom method
+            elif action == 1:  # Next phase
                 phase_count = self._get_phase_count(tl_id)
                 next_phase = (current_phase + 1) % phase_count
                 traci.trafficlight.setPhase(tl_id, next_phase)
@@ -921,8 +950,8 @@ class SmartTrafficController:
             reward = 0
             if lane_id in self.previous_states and lane_id in self.previous_actions:
                 reward = self._calculate_reward(lane_id, lane_data, 
-                                              self.previous_actions[lane_id], 
-                                              current_time)
+                                            self.previous_actions[lane_id], 
+                                            current_time)
                 
                 # Prepare lane info for logging
                 lane_info = {
@@ -941,7 +970,8 @@ class SmartTrafficController:
                     'tl_id': self.lane_to_tl.get(lane_id, ''),
                     'phase_id': traci.trafficlight.getPhase(self.lane_to_tl.get(lane_id, '')) if lane_id in self.lane_to_tl else -1,
                     'epsilon': self.rl_agent.epsilon,
-                    'learning_rate': self.rl_agent.learning_rate
+                    'learning_rate': self.rl_agent.learning_rate,
+                    'adaptive_params': self.adaptive_params.copy()
                 }
                 
                 # Update Q-table
@@ -996,7 +1026,7 @@ class SmartTrafficController:
             if tl_id:
                 try:
                     current_phase = traci.trafficlight.getPhase(tl_id)
-                    num_phases = self._get_phase_count(tl_id)  # FIXED: Use custom method
+                    num_phases = self._get_phase_count(tl_id)
                     phase_norm = current_phase / max(num_phases-1, 1)
                 except:
                     pass
@@ -1092,9 +1122,6 @@ class SmartTrafficController:
             # Save collected data
             self.data_logger.save_episode()
             
-            # Save RL model
-            self.rl_agent.save_model()
-            
             # Print performance summary
             perf = self.data_logger.get_performance_summary()
             print(f"\nEpisode {self.current_episode} Performance:")
@@ -1103,6 +1130,9 @@ class SmartTrafficController:
             
             # Update adaptive parameters based on performance
             self._update_adaptive_parameters(perf)
+            
+            # Save RL model with updated adaptive parameters
+            self.rl_agent.save_model(adaptive_params=self.adaptive_params)
             
             # Reset episode-specific state
             self.previous_states.clear()
@@ -1140,7 +1170,7 @@ class SmartTrafficController:
         except Exception as e:
             print(f"Error updating adaptive parameters: {e}")
 
-def start_enhanced_simulation(sumocfg_path, use_gui=True, max_steps=None, episodes=1,num_retries=1, retry_delay=1):
+def start_enhanced_simulation(sumocfg_path, use_gui=True, max_steps=None, episodes=1, num_retries=1, retry_delay=1):
     """Run enhanced simulation with the smart controller"""
     controller = None
     try:
@@ -1195,6 +1225,7 @@ def start_enhanced_simulation(sumocfg_path, use_gui=True, max_steps=None, episod
             traci.close()
         except:
             pass
+        print("Simulation resources cleaned up")
 
 if __name__ == "__main__":
     import argparse
@@ -1206,5 +1237,4 @@ if __name__ == "__main__":
     parser.add_argument('--num-retries', type=int, default=1, help='Number of retries if connection fails')
     parser.add_argument('--retry-delay', type=int, default=1, help='Delay in seconds between retries')
     args = parser.parse_args()
-    # Pass args.num_retries and args.retry_delay to your function if you use them
     start_enhanced_simulation(args.sumo, args.gui, args.max_steps, args.episodes, args.num_retries, args.retry_delay)

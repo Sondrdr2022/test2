@@ -40,7 +40,7 @@ def export_training_data_xlsx_only(training_data, base_filename):
             print(f"  Processing entry {i+1}/{len(training_data)}")
         
         clean_entry = {
-            'episode_step': i + 1,
+            'episode_step': entry.get('simulation_time', i + 1),
             'action': int(entry.get('action', 0)),
             'reward': float(entry.get('reward', 0)),
             'q_value': float(entry.get('q_value', 0)),
@@ -176,4 +176,4 @@ def analyze_qtable(pkl_file='q_table.pkl'):
         traceback.print_exc()
 
 if __name__ == "__main__":
-    analyze_qtable('q_table.pkl')
+    analyze_qtable('enhanced_q_table.pkl')
