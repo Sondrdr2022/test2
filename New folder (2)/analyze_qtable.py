@@ -47,6 +47,11 @@ def export_training_data_xlsx_only(training_data, base_filename):
             'done': bool(entry.get('done', False))
         }
         
+        # Add requested per-lane columns if present in the entry
+        for col in ['lane_id', 'edge_id', 'c', 'm', 'v', 'g', 'queue_lane', 'queue_route', 'flow_route', 'wait_lane']:
+            if col in entry:
+                clean_entry[col] = entry[col]
+        
         # Add state data
         state_cols = clean_state_data(entry.get('state', []))
         for col, val in state_cols.items():
@@ -64,7 +69,8 @@ def export_training_data_xlsx_only(training_data, base_filename):
     
     # Reorder columns
     column_order = [
-        'episode_step', 'action', 'reward', 'q_value', 'done',
+        'episode_step', 'lane_id', 'edge_id', 'c', 'action', 'reward', 'q_value', 'done',
+        'm', 'v', 'g', 'queue_lane', 'queue_route', 'flow_route', 'wait_lane',
         'state_time_norm', 'state_queue_norm', 'state_wait_norm', 
         'state_density_norm', 'state_speed_norm', 'state_flow_norm',
         'next_state_time_norm', 'next_state_queue_norm', 'next_state_wait_norm',

@@ -37,37 +37,68 @@ class QLearningAgent:
         self._loaded_training_count = 0
         self.load_model()  # Load existing model if available
 
-    def get_action(self, state, training=True):
-        state_key = self._state_to_key(state)
+    def get_action(self, state, lane_id=None, training=True):  # CHANGE: add lane_id param
+        state_key = self._state_to_key(state, lane_id)  # CHANGE: use lane_id in key
         if training and np.random.rand() < self.epsilon:
             return np.random.randint(0, self.action_size)
         else:
             return np.argmax(self.q_table[state_key])
 
-    def update_q_table(self, state, action, reward, next_state):
-        state_key = self._state_to_key(state)
-        next_state_key = self._state_to_key(next_state)
+    def update_q_table(self, state, action, reward, next_state, lane_info=None):
+        """Update Q-table using Q-learning formula, extended for lane/route info"""
+        # CHANGE: Use lane_id in Q-table key for per-lane learning
+        lane_id = lane_info['lane_id'] if lane_info and 'lane_id' in lane_info else None
+        state_key = self._state_to_key(state, lane_id)
+        next_state_key = self._state_to_key(next_state, lane_id)  # next_state for same lane
         current_q = self.q_table[state_key][action]
         max_next_q = np.max(self.q_table[next_state_key])
         new_q = current_q + self.learning_rate * (reward + self.discount_factor * max_next_q - current_q)
         self.q_table[state_key][action] = new_q
-        # Store training data for incremental dataset
-        self.training_data.append({
+        # Store training data for incremental dataset (EXTENDED)
+        entry = {
             'state': state,
             'action': action,
             'reward': reward,
             'next_state': next_state,
             'q_value': new_q
-        })
-
-    def _state_to_key(self, state):
-        return tuple(np.round(state, 2))
+        }
+        if lane_info:  # Include extra lane/route info if provided
+            entry.update(lane_info)
+        self.training_data.append(entry)
 
     def save_model(self, filepath=None):
-        """Save Q-table and training data, appending only new data to existing data"""
+        """Save Q-table and training data, appending to existing data"""
         if filepath is None:
             filepath = self.q_table_file
+        if os.path.exists(filepath):
+            with open(filepath, 'rb') as f:
+                model_data = pickle.load(f)
+            old_training = model_data.get('training_data', [])
+        else:
+            old_training = []
+        model_data = {
+            'q_table': dict(self.q_table),
+            'training_data': old_training + self.training_data,
+            'params': {
+                'state_size': self.state_size,
+                'action_size': self.action_size,
+                'learning_rate': self.learning_rate,
+                'discount_factor': self.discount_factor,
+                'epsilon': self.epsilon
+            }
+        }
+        with open(filepath, 'wb') as f:
+            pickle.dump(model_data, f)
+        self.training_data = []
 
+            
+    def _state_to_key(self, state, lane_id=None):  # CHANGE: lane_id as part of key
+        key = tuple(np.round(state, 2))
+        if lane_id is not None:
+            return (lane_id, key)
+        return key
+    
+    '''
         # Initialize with current data
         model_data = {
             'q_table': dict(self.q_table),
@@ -120,7 +151,7 @@ class QLearningAgent:
 
         print(f"✅ Model saved with {len(model_data['training_data'])} training entries (added {len(self.training_data)})")
         self.training_data = []
-
+        '''
     def load_model(self, filepath=None):
         """Load Q-table and training data if exists"""
         if filepath is None:
@@ -129,17 +160,15 @@ class QLearningAgent:
             if os.path.exists(filepath):
                 with open(filepath, 'rb') as f:
                     model_data = pickle.load(f)
-
+                # CHANGE: Use default dict for lane+state Q-table
                 self.q_table = defaultdict(lambda: np.zeros(self.action_size))
                 loaded_q_table = model_data.get('q_table', {})
                 self.q_table.update(loaded_q_table)
                 self._loaded_training_count = len(model_data.get('training_data', []))
-
                 params = model_data.get('params', {})
                 self.learning_rate = params.get('learning_rate', self.learning_rate)
                 self.discount_factor = params.get('discount_factor', self.discount_factor)
                 self.epsilon = params.get('epsilon', self.epsilon)
-
                 print(f"Loaded Q-table with {len(self.q_table)} states from {filepath} (prev training count: {self._loaded_training_count})")
                 return True
         except Exception as e:
@@ -159,21 +188,25 @@ class DataLogger:
 
     def _initialize_log_file(self):
         headers = [
-            'episode', 'time', 'lane_id', 'state', 'action', 'reward', 'next_state', 'ambulance_detected'
+            'episode', 'time', 'lane_id', 'edge_id',  # CHANGE: add edge_id
+            'state', 'action', 'reward', 'next_state', 'q_value', 'ambulance_detected'
         ]
         df = pd.DataFrame(columns=headers)
         df.to_csv(self.log_file, index=False)
         print(f"Initialized log file: {self.log_file}")
 
-    def log_step(self, episode, time_step, lane_id, state, action, reward, next_state, ambulance=False):
+    def log_step(self, episode, time_step, lane_id, edge_id, state, action, reward, next_state, q_value, ambulance=False):
+        # CHANGE: log edge_id and q_value as well
         log_entry = {
             'episode': episode,
             'time': time_step,
             'lane_id': lane_id,
+            'edge_id': edge_id,
             'state': json.dumps(state.tolist() if isinstance(state, np.ndarray) else state),
             'action': action,
             'reward': reward,
             'next_state': json.dumps(next_state.tolist() if isinstance(next_state, np.ndarray) else next_state),
+            'q_value': q_value,
             'ambulance_detected': ambulance,
         }
         self.episode_data.append(log_entry)
@@ -229,30 +262,37 @@ class SmartJunctionControllerRL:
     def run_step(self):
         lane_data = self.collect_lane_data()
         lane_status = self.update_lane_status_and_score(lane_data)
-        self.do_rl_step(lane_data)
         self.adjust_traffic_lights(lane_data, lane_status)
         self.step_count += 1
 
-    def do_rl_step(self, lane_data):
-        # For each traffic light, perform RL control for one lane (customize as needed)
-        tl_ids = traci.trafficlight.getIDList()
-        for tl_id in tl_ids:
-            if self.ambulance_active[tl_id]:
-                continue  # skip RL if ambulance override is active
-            controlled_lanes = traci.trafficlight.getControlledLanes(tl_id)
-            if not controlled_lanes:
-                continue
-            lane_id = controlled_lanes[0]  # pick first lane, or customize your selection
+        # Per-lane RL step and logging
+        for lane_id, data in lane_data.items():
             state = self.create_state_vector(lane_id, lane_data)
-            action = self.rl_agent.get_action(state)
-            num_phases = len(traci.trafficlight.getAllProgramLogics(tl_id)[0].phases)
-            phase = action % num_phases
-            traci.trafficlight.setPhase(tl_id, phase)
-            traci.trafficlight.setPhaseDuration(tl_id, self.min_green)
-            reward = self.calculate_reward(lane_id, lane_data, action, traci.simulation.getTime())
-            next_state = self.create_state_vector(lane_id, lane_data)
-            self.rl_agent.update_q_table(state, action, reward, next_state)
-            self.data_logger.log_step(self.current_episode, traci.simulation.getTime(), lane_id, state, action, reward, next_state, ambulance=lane_data[lane_id]['ambulance'])
+            action = self.rl_agent.get_action(state, lane_id=lane_id)
+            # (simulate action, get reward, get next_state)
+            next_state = state  # replace with actual next_state computation
+            reward = 0  # replace with actual reward computation
+            tl_id = self.lane_to_tl.get(lane_id, None)
+            c = traci.trafficlight.getPhase(tl_id) if tl_id else -1
+            lane_info = {
+                'lane_id': lane_id,
+                'edge_id': data['edge_id'],
+                'c': c,  # current signal phase
+                'm': data['density'],
+                'v': data['mean_speed'],
+                'g': data['flow'],
+                'queue_lane': data['queue_length'],
+                'queue_route': data['queue_route'],
+                'flow_route': data['flow_route'],
+                'wait_lane': data['waiting_time'],
+            }
+            self.rl_agent.update_q_table(state, action, reward, next_state, lane_info=lane_info)
+            # Log step with lane/edge info
+            self.data_logger.log_step(
+                self.current_episode, traci.simulation.getTime(), lane_id, data['edge_id'],
+                state, action, reward, next_state, self.rl_agent.q_table[self.rl_agent._state_to_key(state, lane_id)][action],
+                ambulance=data['ambulance']
+            )
 
     def find_phase_for_lane(self, tl_id, target_lane):
         logic = traci.trafficlight.getAllProgramLogics(tl_id)[0]
@@ -266,9 +306,15 @@ class SmartJunctionControllerRL:
         return 0
 
     def collect_lane_data(self):
+        """Collect data for all lanes, including ambulance detection and extra info"""
         lane_data = {}
         lanes = traci.lane.getIDList()
         current_time = traci.simulation.getTime()
+        edge_queues = defaultdict(float)
+        edge_flows = defaultdict(float)
+        lane_to_edge = {}
+
+        # First pass: collect all lane data, and sum queue/flow per edge
         for lane_id in lanes:
             try:
                 lane_length = traci.lane.getLength(lane_id)
@@ -288,6 +334,14 @@ class SmartJunctionControllerRL:
                     except Exception:
                         continue
                 self.priority_vehicles[lane_id] = ambulance_detected
+
+                # Get edge/route id for the lane
+                edge_id = traci.lane.getEdgeID(lane_id)
+                lane_to_edge[lane_id] = edge_id
+
+                edge_queues[edge_id] += queue_length
+                edge_flows[edge_id] += vehicle_count
+
                 lane_data[lane_id] = {
                     'queue_length': queue_length,
                     'waiting_time': waiting_time,
@@ -295,11 +349,18 @@ class SmartJunctionControllerRL:
                     'mean_speed': mean_speed,
                     'flow': vehicle_count,
                     'lane_id': lane_id,
+                    'edge_id': edge_id,
                     'ambulance': ambulance_detected,
                 }
             except Exception as e:
                 print(f"Lane data error: {e}")
                 continue
+
+        # Add edge/route queue/flow to lane data
+        for lane_id, data in lane_data.items():
+            edge_id = data['edge_id']
+            data['queue_route'] = edge_queues[edge_id]
+            data['flow_route'] = edge_flows[edge_id]
         return lane_data
 
     def update_lane_status_and_score(self, lane_data):
