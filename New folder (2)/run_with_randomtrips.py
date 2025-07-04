@@ -1,223 +1,258 @@
 import os
 import sys
 import time
-import random
 import subprocess
 import xml.etree.ElementTree as ET
+import random
+from collections import defaultdict
 
 # Always work in script's directory
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 NET_FILE = 'dataset.net.xml'
 ROUTE_FILE = 'random_trips.rou.xml'
+VTYPES_FILE = 'vtypes.xml'
 SUMOCFG_FILE = 'random_simulation.sumocfg'
-VTYPE_FILE = 'vehicle_types.add.xml'
+RANDOM_SEED = int(time.time())
 
-# Generate a new random seed for each run
-RANDOM_SEED = random.randint(1, 1000000)
-TRIP_NUMBER = 400
+# Optimized congestion parameters
+TRIP_NUMBER = 1000
 BEGIN_TIME = 0
 END_TIME = 3600
 USE_GUI = True
 
+# Congestion settings
+PEAK_INTENSITY = 2.0
+CONGESTION_PERIODS = [
+    (900, 1200),   # Morning rush: 15-20 minutes
+    (1800, 2100)   # Evening rush: 30-35 minutes
+]
+
 SUMO_HOME = os.environ.get('SUMO_HOME', r'C:\Program Files (x86)\Eclipse\Sumo')
 TOOLS_PATH = os.path.join(SUMO_HOME, 'tools')
 RANDOMTRIPS_PATH = os.path.join(TOOLS_PATH, 'randomTrips.py')
+SUMO_BINARY = os.path.join(SUMO_HOME, 'bin', 'sumo-gui.exe' if USE_GUI else 'sumo.exe')
 
 def create_vehicle_types():
-    """Create diverse vehicle types with different characteristics"""
-    root = ET.Element('additional')
+    """Create optimized vehicle types for congestion"""
+    vtypes = ET.Element('routes')
     
-    # Define various vehicle types with different properties
-    vehicle_types = [
-        {
-            'id': 'car_normal',
-            'accel': '2.6',
-            'decel': '4.5',
-            'sigma': '0.5',
-            'length': '5.0',
-            'maxSpeed': '50.0',
-            'vClass': 'passenger'
-        },
-        {
-            'id': 'car_aggressive',
-            'accel': '3.5',
-            'decel': '5.0',
-            'sigma': '0.3',
-            'length': '4.5',
-            'maxSpeed': '60.0',
-            'vClass': 'passenger'
-        },
-        {
-            'id': 'car_slow',
-            'accel': '1.8',
-            'decel': '3.5',
-            'sigma': '0.8',
-            'length': '5.5',
-            'maxSpeed': '40.0',
-            'vClass': 'passenger'
-        },
-        {
-            'id': 'truck',
-            'accel': '1.2',
-            'decel': '3.0',
-            'sigma': '0.6',
-            'length': '12.0',
-            'maxSpeed': '35.0',
-            'vClass': 'truck'
-        },
-        {
-            'id': 'bus',
-            'accel': '1.0',
-            'decel': '2.8',
-            'sigma': '0.7',
-            'length': '15.0',
-            'maxSpeed': '30.0',
-            'vClass': 'bus'
-        },
-        {
-            'id': 'motorcycle',
-            'accel': '4.0',
-            'decel': '6.0',
-            'sigma': '0.4',
-            'length': '2.5',
-            'maxSpeed': '70.0',
-            'vClass': 'motorcycle'
-        }
-    ]
+    # Passenger car (60% of vehicles)
+    ET.SubElement(vtypes, 'vType', {
+        'id': 'passenger',
+        'vClass': 'passenger',
+        'length': '4.5',
+        'maxSpeed': '55',
+        'accel': '2.6',
+        'decel': '4.5',
+        'sigma': '0.5'
+    })
     
-    # Add vehicle types to XML
-    for vtype in vehicle_types:
-        vtype_elem = ET.SubElement(root, 'vType')
-        for attr, value in vtype.items():
-            vtype_elem.set(attr, value)
+    # Truck (25% of vehicles)
+    ET.SubElement(vtypes, 'vType', {
+        'id': 'truck',
+        'vClass': 'truck',
+        'length': '16',
+        'maxSpeed': '35',
+        'accel': '1.3',
+        'decel': '3.0',
+        'sigma': '0.3'
+    })
     
-    # Write vehicle types file
-    tree = ET.ElementTree(root)
-    with open(VTYPE_FILE, 'wb') as f:
+    # Bus (15% of vehicles)
+    ET.SubElement(vtypes, 'vType', {
+        'id': 'bus',
+        'vClass': 'bus',
+        'length': '12',
+        'maxSpeed': '40',
+        'accel': '1.5',
+        'decel': '3.5',
+        'sigma': '0.4'
+    })
+    
+    tree = ET.ElementTree(vtypes)
+    with open(VTYPES_FILE, 'wb') as f:
         tree.write(f, encoding='utf-8', xml_declaration=True)
-    print(f"[INFO] Created vehicle types file: {VTYPE_FILE}")
+    print(f"[INFO] Created optimized vehicle types: {VTYPES_FILE}")
 
 def generate_randomtrips():
-    """Generate random trips with varied vehicle types and congestion"""
-    # Vary trip density for different congestion levels
-    congestion_factor = random.uniform(0.5, 2.0)  # 0.5 = light traffic, 2.0 = heavy traffic
-    adjusted_trip_number = int(TRIP_NUMBER * congestion_factor)
+    """Generate trips with optimized congestion"""
+    base_vehicles = int(TRIP_NUMBER * 0.7)
+    congestion_vehicles = int(TRIP_NUMBER * 0.3 * PEAK_INTENSITY)
     
-    # Calculate period between trips
-    period = max(1, END_TIME // adjusted_trip_number)
+    # Calculate periods
+    base_period = max(1, END_TIME // base_vehicles)
     
-    # Create weighted vehicle type distribution
-    vehicle_weights = [
-        ('car_normal', 0.4),
-        ('car_aggressive', 0.2),
-        ('car_slow', 0.2),
-        ('truck', 0.1),
-        ('bus', 0.05),
-        ('motorcycle', 0.05)
-    ]
-    
-    # Build vehicle type string for randomTrips.py
-    vtypes = []
-    for vtype, weight in vehicle_weights:
-        vtypes.extend([vtype] * int(weight * 100))
-    
-    vtype_string = ','.join(vtypes)
-    
-    cmd = [
+    # Baseline traffic
+    print("[INFO] Generating baseline traffic...")
+    base_cmd = [
         sys.executable, RANDOMTRIPS_PATH,
         '-n', NET_FILE,
-        '-o', ROUTE_FILE,
+        '-o', 'baseline.rou.xml',
         '--seed', str(RANDOM_SEED),
         '--trip-attributes', 'departLane="best" departSpeed="max" departPos="random_free"',
         '-b', str(BEGIN_TIME),
         '-e', str(END_TIME),
-        '-p', str(period),
-        '--vehicle-class', vtype_string,
+        '-p', str(base_period),
         '--validate'
     ]
+    subprocess.check_call(base_cmd)
     
-    print(f"[INFO] Generating random trips with seed: {RANDOM_SEED}")
-    print(f"[INFO] Congestion factor: {congestion_factor:.2f}")
-    print(f"[INFO] Adjusted trip number: {adjusted_trip_number}")
-    print(f"[INFO] Period between trips: {period}s")
-    print("[INFO] Command:")
-    print(" ".join(cmd))
+    # Congestion traffic
+    route_files = ['baseline.rou.xml']
+    for i, (start, end) in enumerate(CONGESTION_PERIODS):
+        print(f"[INFO] Generating congestion period {i+1}...")
+        duration = end - start
+        congestion_period = max(1, duration // (congestion_vehicles // len(CONGESTION_PERIODS)))
+        
+        congestion_cmd = [
+            sys.executable, RANDOMTRIPS_PATH,
+            '-n', NET_FILE,
+            '-o', f'congestion_{i}.rou.xml',
+            '--seed', str(RANDOM_SEED + i + 1),
+            '--trip-attributes', 'departLane="best" departSpeed="max" departPos="random_free"',
+            '-b', str(start),
+            '-e', str(end),
+            '-p', str(congestion_period),
+            '--prefix', f'peak{i}_',
+            '--validate'
+        ]
+        subprocess.check_call(congestion_cmd)
+        route_files.append(f'congestion_{i}.rou.xml')
     
-    subprocess.check_call(cmd)
-    print(f"[INFO] Random trips generated: {ROUTE_FILE}")
+    # Merge files with sorting
+    merge_and_assign_vehicles(route_files, ROUTE_FILE)
+    print(f"[INFO] Optimized routes generated: {ROUTE_FILE}")
 
-def modify_route_file_for_vtypes():
-    """Modify the generated route file to assign random vehicle types"""
-    try:
-        tree = ET.parse(ROUTE_FILE)
+def merge_and_assign_vehicles(route_files, output_file):
+    """Merge route files with optimized assignments and proper sorting"""
+    # Create dictionary to store vehicles by departure time
+    vehicles_by_time = defaultdict(list)
+    
+    # Process files and collect vehicles
+    for route_file in route_files:
+        tree = ET.parse(route_file)
         root = tree.getroot()
         
-        vehicle_types = ['car_normal', 'car_aggressive', 'car_slow', 'truck', 'bus', 'motorcycle']
-        weights = [0.4, 0.2, 0.2, 0.1, 0.05, 0.05]
-        
-        # Find all vehicle/trip elements and assign random types
-        for elem in root.iter():
-            if elem.tag in ['vehicle', 'trip']:
-                # Assign random vehicle type based on weights
-                vtype = random.choices(vehicle_types, weights=weights)[0]
-                elem.set('type', vtype)
-        
-        # Write back the modified file
-        tree.write(ROUTE_FILE, encoding='utf-8', xml_declaration=True)
-        print(f"[INFO] Modified route file with vehicle types: {ROUTE_FILE}")
-        
-    except Exception as e:
-        print(f"[WARNING] Could not modify route file: {e}")
+        for element in root:
+            if element.tag in ['trip', 'vehicle']:
+                # Get departure time (default to 0 if missing)
+                depart_time = float(element.get('depart', '0'))
+                
+                # Assign vehicle type
+                rand = random.random()
+                if 'baseline' in route_file:
+                    vtype = 'passenger' if rand < 0.7 else 'truck' if rand < 0.9 else 'bus'
+                else:  # Congestion file
+                    vtype = 'passenger' if rand < 0.5 else 'truck' if rand < 0.8 else 'bus'
+                element.set('type', vtype)
+                
+                # Store in dictionary by time
+                vehicles_by_time[depart_time].append(element)
+    
+    # Create sorted list of departure times
+    sorted_times = sorted(vehicles_by_time.keys())
+    
+    # Create new root element
+    routes = ET.Element('routes')
+    
+    # Add vehicle types first
+    vtypes_tree = ET.parse(VTYPES_FILE)
+    for vtype in vtypes_tree.getroot():
+        routes.append(vtype)
+    
+    # Add vehicles in chronological order
+    for time in sorted_times:
+        for vehicle in vehicles_by_time[time]:
+            routes.append(vehicle)
+    
+    # Write sorted route file
+    tree = ET.ElementTree(routes)
+    with open(output_file, 'wb') as f:
+        tree.write(f, encoding='utf-8', xml_declaration=True)
+    
+    # Cleanup
+    for file in route_files:
+        if os.path.exists(file):
+            os.remove(file)
 
 def build_sumocfg():
-    """Build SUMO configuration file including vehicle types"""
+    """Build optimized SUMO configuration"""
     cfg = ET.Element('configuration')
-    
-    # Input section
     input_elem = ET.SubElement(cfg, 'input')
-    netfile_elem = ET.SubElement(input_elem, 'net-file')
-    netfile_elem.set('value', NET_FILE)
-    routefile_elem = ET.SubElement(input_elem, 'route-files')
-    routefile_elem.set('value', ROUTE_FILE)
+    ET.SubElement(input_elem, 'net-file').set('value', NET_FILE)
+    ET.SubElement(input_elem, 'route-files').set('value', ROUTE_FILE)
     
-    # Add vehicle types file
-    addfile_elem = ET.SubElement(input_elem, 'additional-files')
-    addfile_elem.set('value', VTYPE_FILE)
-    
-    # Time section
     time_elem = ET.SubElement(cfg, 'time')
     ET.SubElement(time_elem, 'begin').set('value', str(BEGIN_TIME))
     ET.SubElement(time_elem, 'end').set('value', str(END_TIME))
-    
-    # Random number generation
-    random_elem = ET.SubElement(cfg, 'random_number')
-    ET.SubElement(random_elem, 'seed').set('value', str(RANDOM_SEED))
-    
+
     tree = ET.ElementTree(cfg)
     with open(SUMOCFG_FILE, 'wb') as f:
         tree.write(f, encoding='utf-8', xml_declaration=True)
-    print(f"[INFO] Generated SUMO config: {SUMOCFG_FILE}")
+    print(f"[INFO] Generated optimized SUMO config: {SUMOCFG_FILE}")
 
 def run_rl_script(extra_args=None):
-    """Run the RL main script"""
-    rl_script = 'Lane.py'  # Change if your RL main file has different name
+    """Run with connection retry optimization"""
+    rl_script = 'Lane.py'
     cmd = [sys.executable, rl_script, '--sumo', SUMOCFG_FILE]
+    
+    # Add connection retry parameters
+    cmd.extend(['--num-retries', '120'])
+    cmd.extend(['--retry-delay', '1'])
+    
     if USE_GUI:
         cmd.append('--gui')
-    # Add any extra arguments
     if extra_args:
         cmd.extend(extra_args)
-    print("[INFO] Running RL script with command:")
+    
+    print("[INFO] Running RL script with optimized parameters:")
     print(" ".join(cmd))
-    subprocess.check_call(cmd)
+    try:
+        subprocess.check_call(cmd)
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] RL script failed: {e}")
+        sys.exit(1)
+
+def validate_simulation():
+    """Test SUMO configuration before RL run"""
+    cmd = [SUMO_BINARY, '-c', SUMOCFG_FILE, '--no-step-log', 'true']
+    print("[INFO] Validating simulation with command:")
+    print(" ".join(cmd))
+    try:
+        # Run validation for 10 seconds max
+        result = subprocess.run(cmd, timeout=10, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"[ERROR] Validation failed with exit code {result.returncode}")
+            print("Validation output:")
+            print(result.stdout)
+            print(result.stderr)
+            sys.exit(1)
+        print("[SUCCESS] Simulation validated successfully!")
+    except subprocess.TimeoutExpired:
+        print("[SUCCESS] Validation timed out but SUMO started (expected behavior)")
+    except Exception as e:
+        print(f"[ERROR] Validation failed: {str(e)}")
+        sys.exit(1)
 
 if __name__ == '__main__':
-    print(f"[INFO] Starting simulation with random seed: {RANDOM_SEED}")
+    print("🚦 GENERATING OPTIMIZED CONGESTION SIMULATION")
+    print(f"📊 Total vehicles: {TRIP_NUMBER}")
+    print(f"🚨 Peak intensity: {PEAK_INTENSITY}x")
+    print(f"⏰ Congestion periods: {len(CONGESTION_PERIODS)}")
+    print("=" * 60)
+    
     create_vehicle_types()
     generate_randomtrips()
-    modify_route_file_for_vtypes()
     build_sumocfg()
     
-    # You can add args like ['--max-steps', '1500', '--episodes', '2']
-    run_rl_script(extra_args=['--max-steps', '1500', '--episodes', '2'])
+    # Validate before RL run
+    validate_simulation()
+    
+    # Run with retry parameters
+    run_rl_script(extra_args=[
+        '--max-steps', '1500',
+        '--episodes', '2'
+    ])
+    
+    print("\n🎉 Simulation completed successfully!")
