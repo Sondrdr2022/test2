@@ -119,9 +119,8 @@ class EnhancedQLearningAgent:
         }
         if lane_info:
             entry.update(lane_info)
-            entry['simulation_time'] = lane_info.get('simulation_time', None)
         self.training_data.append(entry)
-                
+        
         # Update adaptive parameters
         self._update_adaptive_parameters(reward)
 
@@ -331,12 +330,6 @@ class EnhancedDataLogger:
                 # Append to existing CSV
                 df = pd.DataFrame(self.episode_data)
                 df.to_csv(self.log_file, mode='a', header=False, index=False)
-                
-                # Save a compressed version periodically
-                if self.current_episode % 10 == 0:
-                    compressed_file = f"compressed_{self.log_file}"
-                    df.to_csv(compressed_file, mode='a', header=not os.path.exists(compressed_file), 
-                             index=False, compression='gzip')
                 
                 print(f"✅ Saved {len(self.episode_data)} records for episode {self.current_episode}")
                 self.episode_data = []
