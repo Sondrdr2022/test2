@@ -37,6 +37,7 @@ class EnhancedQLearningAgent:
         self.training_data = []
         self.q_table_file = q_table_file
         self._loaded_training_count = 0
+        self.reward_components = []  # Track reward components
         
         # Adaptive learning parameters
         self.reward_history = []
@@ -106,16 +107,19 @@ class EnhancedQLearningAgent:
         
         self.q_table[state_key][action] = new_q
         
-        # Store training data with additional context
+        # Store training data with detailed reward components
         entry = {
             'state': state.tolist() if isinstance(state, np.ndarray) else state,
             'action': action,
             'reward': reward,
+            'reward_components': lane_info.get('reward_components', {}),
             'next_state': next_state.tolist() if isinstance(next_state, np.ndarray) else next_state,
             'q_value': new_q,
             'timestamp': time.time(),
             'learning_rate': self.learning_rate,
-            'epsilon': self.epsilon
+            'epsilon': self.epsilon,
+            'lane_id': lane_id,
+            'action_name': self._get_action_name(action)
         }
         if lane_info:
             entry.update(lane_info)
@@ -123,6 +127,17 @@ class EnhancedQLearningAgent:
         
         # Update adaptive parameters
         self._update_adaptive_parameters(reward)
+
+    def _get_action_name(self, action):
+        """Get human-readable action name"""
+        action_names = {
+            0: "Set Green",
+            1: "Next Phase",
+            2: "Extend Phase",
+            3: "Shorten Phase",
+            4: "Balanced Phase"
+        }
+        return action_names.get(action, f"Unknown Action {action}")
 
     def _update_adaptive_parameters(self, reward):
         """Adjust learning parameters based on performance"""
@@ -213,7 +228,8 @@ class EnhancedQLearningAgent:
                 'metadata': {
                     'last_updated': datetime.datetime.now().isoformat(),
                     'training_count': len(self.training_data),
-                    'average_reward': np.mean([x['reward'] for x in self.training_data[-100:]]) if self.training_data else 0
+                    'average_reward': np.mean([x['reward'] for x in self.training_data[-100:]]) if self.training_data else 0,
+                    'reward_components': [x.get('reward_components', {}) for x in self.training_data[-100:]]
                 }
             }
             
@@ -835,10 +851,17 @@ class SmartTrafficController:
             
             # Calculate reward if we have previous state
             reward = 0
+            reward_components = {}
             if lane_id in self.previous_states and lane_id in self.previous_actions:
-                reward = self._calculate_reward(lane_id, lane_data, 
+                reward, reward_components = self._calculate_reward(lane_id, lane_data, 
                                             self.previous_actions[lane_id], 
                                             current_time)
+                
+                # Log reward components
+                print(f"🏆 Lane {lane_id} reward components:")
+                for comp, value in reward_components.items():
+                    print(f"  - {comp}: {value:.2f}")
+                print(f"  Total reward: {reward:.2f}")
                 
                 # Update Q-table
                 self.rl_agent.update_q_table(
@@ -863,7 +886,9 @@ class SmartTrafficController:
                         'phase_id': traci.trafficlight.getPhase(self.lane_to_tl.get(lane_id, '')) if lane_id in self.lane_to_tl else -1,
                         'epsilon': self.rl_agent.epsilon,
                         'learning_rate': self.rl_agent.learning_rate,
-                        'adaptive_params': self.adaptive_params.copy()
+                        'adaptive_params': self.adaptive_params.copy(),
+                        'simulation_time': current_time,
+                        'reward_components': reward_components  # Store detailed reward breakdown
                     }
                 )
             
@@ -930,7 +955,7 @@ class SmartTrafficController:
             return np.zeros(12)
 
     def _calculate_reward(self, lane_id, lane_data, action_taken, current_time):
-        """Calculate comprehensive reward signal"""
+        """Calculate comprehensive reward signal with detailed components"""
         try:
             data = lane_data[lane_id]
             
@@ -978,11 +1003,25 @@ class SmartTrafficController:
             if np.isnan(normalized_reward) or np.isinf(normalized_reward):
                 normalized_reward = 0.0
                 
-            return normalized_reward
+            # Return both the reward and its components
+            reward_components = {
+                'queue_penalty': queue_penalty,
+                'wait_penalty': wait_penalty,
+                'throughput_reward': throughput_reward,
+                'speed_reward': speed_reward,
+                'action_bonus': action_bonus,
+                'starvation_penalty': starvation_penalty,
+                'ambulance_bonus': ambulance_bonus,
+                'left_turn_bonus': left_turn_bonus,
+                'total_raw': total_reward,
+                'normalized': normalized_reward
+            }
+            
+            return normalized_reward, reward_components
             
         except Exception as e:
             print(f"Error calculating reward for {lane_id}: {e}")
-            return 0.0
+            return 0.0, {}
 
     def end_episode(self):
         """Finalize episode and save data"""
