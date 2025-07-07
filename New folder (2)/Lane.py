@@ -231,118 +231,11 @@ class EnhancedQLearningAgent:
         except Exception as e:
             print(f"Error saving model: {e}")
 
-class EnhancedDataLogger:
-    """Enhanced data logger with real-time analysis"""
-    def __init__(self, log_file='enhanced_traffic_rl_log.csv'):
-        self.log_file = log_file
-        self.episode_data = []
-        self.current_episode = 0
-        self._initialize_log_file()
-        
-        # Real-time analysis buffers
-        self.reward_buffer = []
-        self.action_distribution = defaultdict(int)
-        self.state_statistics = defaultdict(list)
-
-    def _initialize_log_file(self):
-        headers = [
-            'episode', 'timestamp', 'simulation_time', 'lane_id', 'edge_id', 'route_id',
-            'state', 'action', 'reward', 'next_state', 'q_value', 
-            'ambulance_detected', 'left_turn', 'phase_id', 'tl_id',
-            'queue_length', 'waiting_time', 'density', 'flow', 'speed',
-            'queue_route', 'flow_route', 'learning_params'
-        ]
-        
-        if not os.path.exists(self.log_file):
-            pd.DataFrame(columns=headers).to_csv(self.log_file, index=False)
-            print(f"Initialized enhanced log file: {self.log_file}")
-
-    def log_step(self, episode, time_step, lane_info, state, action, reward, next_state, q_value):
-        """Enhanced logging with more contextual information"""
-        log_entry = {
-            'episode': episode,
-            'timestamp': datetime.datetime.now().isoformat(),
-            'simulation_time': time_step,
-            'lane_id': lane_info.get('lane_id', ''),
-            'edge_id': lane_info.get('edge_id', ''),
-            'route_id': lane_info.get('route_id', ''),
-            'state': json.dumps(state.tolist() if isinstance(state, np.ndarray) else state),
-            'action': action,
-            'reward': reward,
-            'next_state': json.dumps(next_state.tolist() if isinstance(next_state, np.ndarray) else next_state),
-            'q_value': q_value,
-            'ambulance_detected': lane_info.get('ambulance', False),
-            'left_turn': lane_info.get('left_turn', False),
-            'phase_id': lane_info.get('phase_id', -1),
-            'tl_id': lane_info.get('tl_id', ''),
-            'queue_length': lane_info.get('queue_length', 0),
-            'waiting_time': lane_info.get('waiting_time', 0),
-            'density': lane_info.get('density', 0),
-            'flow': lane_info.get('flow', 0),
-            'speed': lane_info.get('mean_speed', 0),
-            'queue_route': lane_info.get('queue_route', 0),
-            'flow_route': lane_info.get('flow_route', 0),
-            'learning_params': json.dumps({
-                'epsilon': lane_info.get('epsilon', 0),
-                'learning_rate': lane_info.get('learning_rate', 0),
-                'adaptive_params': lane_info.get('adaptive_params', {})
-            })
-        }
-        
-        self.episode_data.append(log_entry)
-        
-        # Update real-time analysis
-        self._update_realtime_stats(action, reward, state)
-
-    def _update_realtime_stats(self, action, reward, state):
-        """Update real-time performance statistics"""
-        self.reward_buffer.append(reward)
-        self.action_distribution[action] += 1
-        
-        # Keep only recent data for statistics
-        if len(self.reward_buffer) > 1000:
-            self.reward_buffer.pop(0)
-            
-        # Track state statistics
-        if isinstance(state, (list, np.ndarray)):
-            for i, val in enumerate(state):
-                self.state_statistics[f'state_{i}'].append(val)
-                if len(self.state_statistics[f'state_{i}']) > 1000:
-                    self.state_statistics[f'state_{i}'].pop(0)
-
-    def get_performance_summary(self):
-        """Return current performance metrics"""
-        if not self.reward_buffer:
-            return {}
-            
-        return {
-            'avg_reward': np.mean(self.reward_buffer),
-            'min_reward': np.min(self.reward_buffer),
-            'max_reward': np.max(self.reward_buffer),
-            'action_distribution': dict(self.action_distribution),
-            'state_stats': {k: {'mean': np.mean(v), 'std': np.std(v)} 
-                           for k, v in self.state_statistics.items()}
-        }
-
-    def save_episode(self):
-        if self.episode_data:
-            try:
-                # Append to existing CSV
-                df = pd.DataFrame(self.episode_data)
-                df.to_csv(self.log_file, mode='a', header=False, index=False)
-                
-                print(f"✅ Saved {len(self.episode_data)} records for episode {self.current_episode}")
-                self.episode_data = []
-                
-            except Exception as e:
-                print(f"Error saving episode data: {e}")
-
 class SmartTrafficController:
     """Enhanced traffic controller with dynamic parameter adjustment"""
     def __init__(self, state_size=12, action_size=5):
         # Core components
         self.rl_agent = EnhancedQLearningAgent(state_size, action_size)
-        self.data_logger = EnhancedDataLogger()
         
         # Traffic state tracking
         self.lane_scores = defaultdict(int)
@@ -947,51 +840,31 @@ class SmartTrafficController:
                                             self.previous_actions[lane_id], 
                                             current_time)
                 
-                # Prepare lane info for logging
-                lane_info = {
-                    'lane_id': lane_id,
-                    'edge_id': data['edge_id'],
-                    'route_id': data['route_id'],
-                    'queue_length': data['queue_length'],
-                    'waiting_time': data['waiting_time'],
-                    'density': data['density'],
-                    'mean_speed': data['mean_speed'],
-                    'flow': data['flow'],
-                    'queue_route': data['queue_route'],
-                    'flow_route': data['flow_route'],
-                    'ambulance': data['ambulance'],
-                    'left_turn': data['left_turn'],
-                    'tl_id': self.lane_to_tl.get(lane_id, ''),
-                    'phase_id': traci.trafficlight.getPhase(self.lane_to_tl.get(lane_id, '')) if lane_id in self.lane_to_tl else -1,
-                    'epsilon': self.rl_agent.epsilon,
-                    'learning_rate': self.rl_agent.learning_rate,
-                    'adaptive_params': self.adaptive_params.copy()
-                }
-                lane_info['simulation_time'] = current_time
-                
                 # Update Q-table
                 self.rl_agent.update_q_table(
                     self.previous_states[lane_id],
                     self.previous_actions[lane_id],
                     reward,
                     state,
-                    lane_info=lane_info
-                )
-                
-                # Get current Q-value for logging
-                state_key = self.rl_agent._state_to_key(state, lane_id)
-                q_value = self.rl_agent.q_table[state_key][action]
-                
-                # Log this step
-                self.data_logger.log_step(
-                    self.current_episode,
-                    current_time,
-                    lane_info,
-                    state,
-                    action,
-                    reward,
-                    state,
-                    q_value
+                    lane_info={
+                        'lane_id': lane_id,
+                        'edge_id': data['edge_id'],
+                        'route_id': data['route_id'],
+                        'queue_length': data['queue_length'],
+                        'waiting_time': data['waiting_time'],
+                        'density': data['density'],
+                        'mean_speed': data['mean_speed'],
+                        'flow': data['flow'],
+                        'queue_route': data['queue_route'],
+                        'flow_route': data['flow_route'],
+                        'ambulance': data['ambulance'],
+                        'left_turn': data['left_turn'],
+                        'tl_id': self.lane_to_tl.get(lane_id, ''),
+                        'phase_id': traci.trafficlight.getPhase(self.lane_to_tl.get(lane_id, '')) if lane_id in self.lane_to_tl else -1,
+                        'epsilon': self.rl_agent.epsilon,
+                        'learning_rate': self.rl_agent.learning_rate,
+                        'adaptive_params': self.adaptive_params.copy()
+                    }
                 )
             
             # Store current state and action
@@ -1114,18 +987,6 @@ class SmartTrafficController:
     def end_episode(self):
         """Finalize episode and save data"""
         try:
-            # Save collected data
-            self.data_logger.save_episode()
-            
-            # Print performance summary
-            perf = self.data_logger.get_performance_summary()
-            print(f"\nEpisode {self.current_episode} Performance:")
-            print(f"• Average Reward: {perf.get('avg_reward', 0):.4f}")
-            print(f"• Action Distribution: {perf.get('action_distribution', {})}")
-            
-            # Update adaptive parameters based on performance
-            self._update_adaptive_parameters(perf)
-            
             # Save RL model with updated adaptive parameters
             self.rl_agent.save_model(adaptive_params=self.adaptive_params)
             
@@ -1133,7 +994,7 @@ class SmartTrafficController:
             self.previous_states.clear()
             self.previous_actions.clear()
             
-            print(f"✅ Episode {self.current_episode} completed and data saved")
+            print(f"✅ Episode {self.current_episode} completed")
             
         except Exception as e:
             print(f"Error ending episode: {e}")
@@ -1144,21 +1005,12 @@ class SmartTrafficController:
             avg_reward = performance_stats.get('avg_reward', 0)
             
             # Adjust green time parameters based on queue performance
-            queue_stats = performance_stats.get('state_stats', {}).get('state_0', {})
-            avg_queue = queue_stats.get('mean', 0)
-            
-            if avg_queue > 0.6:  # High queues
+            if avg_reward > 0.6:  # High queues
                 self.adaptive_params['min_green'] = min(15, self.adaptive_params['min_green'] + 1)
                 self.adaptive_params['max_green'] = min(90, self.adaptive_params['max_green'] + 5)
-            elif avg_queue < 0.3:  # Low queues
+            elif avg_reward < 0.3:  # Low queues
                 self.adaptive_params['min_green'] = max(5, self.adaptive_params['min_green'] - 1)
                 self.adaptive_params['max_green'] = max(30, self.adaptive_params['max_green'] - 5)
-                
-            # Adjust reward weights based on action distribution
-            action_dist = performance_stats.get('action_distribution', {})
-            if action_dist.get(0, 0) > 0.5:  # Too many green actions
-                self.adaptive_params['queue_weight'] = min(1.0, self.adaptive_params['queue_weight'] * 1.1)
-                self.adaptive_params['wait_weight'] = max(0.1, self.adaptive_params['wait_weight'] * 0.9)
                 
             print("🔄 Updated adaptive parameters:", self.adaptive_params)
             
